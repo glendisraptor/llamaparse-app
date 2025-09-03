@@ -107,10 +107,15 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
             f"Starting extraction for {file.filename}..."
         )
         
-        file_path = f"/tmp/{file.filename}"
+        file_path = f"/tmp/{file.filename}"  # Use the actual filename
     
+        # Save the uploaded file to disk
+        contents = await file.read()
         with open(file_path, "wb") as f:
-            f.write(await file.read())
+            f.write(contents)
+
+        # Make sure file is closed after reading
+        await file.close()
 
         llama_parser_result = agent.extract(file_path)
         
