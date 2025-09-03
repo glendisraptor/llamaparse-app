@@ -107,9 +107,9 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
             f"Starting extraction for {file.filename}..."
         )
         
-        # Perform the actual extraction using the in-memory UploadFile
+        # Perform the actual extraction, providing the filename explicitly
         # The LlamaExtract agent's 'extract' method is designed to handle this directly
-        llama_parser_result = await agent.extract(file)
+        llama_parser_result = await agent.extract(file, filename=file.filename)
         
         # Update status: Completed
         await manager.send_status_update(
