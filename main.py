@@ -2,11 +2,11 @@ import json
 import os
 import asyncio
 import uuid
-from typing import Dict
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, BackgroundTasks
+from typing import Dict, Optional
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from llama_cloud_services import LlamaParse, LlamaExtract
-from llama_cloud import ExtractConfig, ExtractMode, ChunkMode, ExtractTarget
+from llama_cloud import ExtractConfig, ExtractMode, ExtractTarget, ChunkMode
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +16,7 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,9 +45,13 @@ config = ExtractConfig(
 )
 
 # Example: use a pre-created agent (from your dashboard)
-agent = extractor.get_agent(
-    id="a025fa19-34ad-4225-b761-40f02d962662"
-)
+try:
+    agent = extractor.get_agent(
+        id="a025fa19-34ad-4225-b761-40f02d962662"
+    )
+except Exception as e:
+    agent = None
+    print(f"Warning: Failed to load LlamaExtract agent. Extraction will not work. Error: {e}")
 
 # Store active WebSocket connections and job statuses
 class ConnectionManager:
@@ -58,10 +62,14 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, client_id: str):
         await websocket.accept()
         self.active_connections[client_id] = websocket
+        # Send an initial message to confirm connection
+        await websocket.send_text(json.dumps({"message": "Connected to WebSocket!", "client_id": client_id}))
+        print(f"Client {client_id} connected.")
 
     def disconnect(self, client_id: str):
         if client_id in self.active_connections:
             del self.active_connections[client_id]
+            print(f"Client {client_id} disconnected.")
 
     async def send_status_update(self, client_id: str, job_id: str, status: str, message: str = "", data: dict = None):
         if client_id in self.active_connections:
@@ -79,51 +87,39 @@ class ConnectionManager:
                 
                 # Update job status
                 self.job_statuses[job_id] = update
-            except:
-                # Connection might be closed, remove it
+            except WebSocketDisconnect:
+                self.disconnect(client_id)
+            except Exception as e:
+                print(f"Error sending message to client {client_id}: {e}")
                 self.disconnect(client_id)
 
 manager = ConnectionManager()
 
-async def process_file_extraction(client_id: str, job_id: str, file_path: str, filename: str):
+async def process_file_extraction(client_id: str, job_id: str, file: UploadFile):
     """Background task to process file extraction with status updates."""
     try:
+        if not agent:
+            raise Exception("LlamaExtract agent not initialized.")
+
         # Update status: Starting
         await manager.send_status_update(
             client_id, job_id, "processing", 
-            f"Starting extraction for {filename}..."
+            f"Starting extraction for {file.filename}..."
         )
         
-        # Simulate parsing phase
-        await manager.send_status_update(
-            client_id, job_id, "processing", 
-            "Parsing document with LlamaParse..."
-        )
-        
-        # Add a small delay to simulate parsing time
-        await asyncio.sleep(1)
-        
-        # Update status: Extracting
-        await manager.send_status_update(
-            client_id, job_id, "processing", 
-            "Extracting structured data..."
-        )
-        
-        # Perform the actual extraction
-        llama_parser_result = agent.extract(file_path)
+        # Perform the actual extraction using the in-memory UploadFile
+        # The LlamaExtract agent's 'extract' method is designed to handle this directly
+        llama_parser_result = await agent.extract(file)
         
         # Update status: Completed
         await manager.send_status_update(
             client_id, job_id, "completed", 
             "Extraction completed successfully!",
             data={
-                "file": filename,
+                "file": file.filename,
                 "extracted": llama_parser_result.data
             }
         )
-        
-        # Clean up the temporary file
-        os.remove(file_path)
         
     except Exception as e:
         # Update status: Error
@@ -131,44 +127,38 @@ async def process_file_extraction(client_id: str, job_id: str, file_path: str, f
             client_id, job_id, "error", 
             f"Extraction failed: {str(e)}"
         )
-        
-        # Clean up the temporary file even on error
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await manager.connect(websocket, client_id)
     try:
+        # Keep the connection open indefinitely
         while True:
-            # Keep the connection alive and listen for any client messages
-            data = await websocket.receive_text()
-            # You can handle client messages here if needed
-            await websocket.send_text(f"Message received: {data}")
+            await websocket.receive_text() # Wait for any message to keep the connection alive
     except WebSocketDisconnect:
         manager.disconnect(client_id)
+    except asyncio.CancelledError:
+        # This handles server shutdown gracefully
+        manager.disconnect(client_id)
 
-@app.post("/extract")
-async def extract_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+@app.post("/extract/{client_id}")
+async def extract_document(client_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """Upload a file and start extraction process."""
-    
-    # Generate unique IDs
+    if client_id not in manager.active_connections:
+        raise HTTPException(
+            status_code=400, 
+            detail="WebSocket connection not found. Please connect to the WebSocket first."
+        )
+
+    # Generate a unique job ID
     job_id = str(uuid.uuid4())
-    client_id = str(uuid.uuid4())  # In a real app, you'd get this from the request
     
-    # Save the file temporarily
-    file_path = f"/tmp/{job_id}_{file.filename}"
-    
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    
-    # Start background task for extraction
+    # Pass the UploadFile directly to the background task
     background_tasks.add_task(
         process_file_extraction, 
         client_id, 
         job_id, 
-        file_path, 
-        file.filename
+        file
     )
     
     return {
