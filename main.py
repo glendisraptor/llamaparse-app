@@ -2,6 +2,7 @@ import json
 import os
 import asyncio
 import uuid
+import shutil
 from typing import Dict, Optional
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,38 +102,36 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
         if not agent:
             raise Exception("LlamaExtract agent not initialized.")
 
-        # Update status: Starting
         await manager.send_status_update(
             client_id, job_id, "processing", 
             f"Starting extraction for {file.filename}..."
         )
-        
-        file_path = f"/tmp/{file.filename}"  # Use the actual filename
-    
-        # Save the uploaded file to disk
-        contents = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(contents)
 
-        # Make sure file is closed after reading
+        file_path = f"/tmp/{file.filename}"
+
+        # Write UploadFile to disk safely
+        with open(file_path, "wb") as out_file:
+            # Use shutil.copyfileobj to avoid reading whole file into memory
+            shutil.copyfileobj(file.file, out_file)
+
+        # Close the UploadFile after saving
         await file.close()
 
+        # Pass the file path to the agent, NOT the UploadFile
         llama_parser_result = agent.extract(file_path)
-        
-        # Update status: Completed
+
         await manager.send_status_update(
-            client_id, job_id, "completed", 
+            client_id, job_id, "completed",
             "Extraction completed successfully!",
             data={
                 "file": file.filename,
                 "extracted": llama_parser_result.data
             }
         )
-        
+
     except Exception as e:
-        # Update status: Error
         await manager.send_status_update(
-            client_id, job_id, "error", 
+            client_id, job_id, "error",
             f"Extraction failed: {str(e)}"
         )
 
