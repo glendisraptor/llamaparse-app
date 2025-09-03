@@ -107,9 +107,12 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
             f"Starting extraction for {file.filename}..."
         )
         
-        # Perform the actual extraction, providing the filename explicitly
-        # The LlamaExtract agent's 'extract' method is designed to handle this directly
-        llama_parser_result = await agent.extract(file)
+        file_path = f"/tmp/{file.filename}"
+    
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        llama_parser_result = agent.extract(file_path)
         
         # Update status: Completed
         await manager.send_status_update(
@@ -130,6 +133,7 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    print(f"Client {client_id} connected to WebSocket.")
     await manager.connect(websocket, client_id)
     try:
         # Keep the connection open indefinitely
