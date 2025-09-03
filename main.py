@@ -109,7 +109,7 @@ async def process_file_extraction(client_id: str, job_id: str, file: UploadFile)
         
         # Perform the actual extraction, providing the filename explicitly
         # The LlamaExtract agent's 'extract' method is designed to handle this directly
-        llama_parser_result = await agent.extract(file, filename=file.filename)
+        llama_parser_result = await agent.extract(file)
         
         # Update status: Completed
         await manager.send_status_update(
